@@ -1,137 +1,223 @@
 # Solr MCP Quick Start Guide
 
-This guide will help you get up and running with the Solr MCP server quickly.
+This guide walks through setting up a Solr MCP (Model Context Protocol) server with Claude Desktop, including all the troubleshooting steps we encountered.
 
 ## Prerequisites
 
-- Python 3.10 or higher
-- Docker and Docker Compose
-- Git
+- macOS (this guide is macOS-specific)
+- Homebrew installed
+- Git access to your Solr MCP repository
 
-## Step 1: Clone the Repository
+## Step 1: Clone and Setup Solr MCP Project
 
 ```bash
-git clone https://github.com/allenday/solr-mcp.git
+git clone git@github.com:albertyusunepiq/solr-mcp.git
 cd solr-mcp
-```
 
-## Step 2: Start SolrCloud with Docker
-
-```bash
+# Start Solr with Docker
+brew install docker-compose
 docker-compose up -d
 ```
 
-This will start a SolrCloud instance with ZooKeeper and Ollama for embedding generation.
-
-Verify that Solr is running by visiting: http://localhost:8983/solr/
-
-## Step 3: Set Up Python Environment
+## Step 2: Install Python Environment Tools
 
 ```bash
-# Create a virtual environment
-python -m venv venv
+# Install pipx to manage Python tools
+brew install pipx
+pipx ensurepath
 
-# Activate it
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+# Install Poetry for dependency management
+pipx install poetry
 
-# Install Poetry
-pip install poetry
+# Reload shell to pick up new PATH
+source ~/.zshrc
 
-# Install dependencies
+```
+
+## Step 3: Setup Python Environment
+
+```bash
+# Create and activate virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Configure Poetry to use this Python version
+poetry env use python3
+
+# Install all project dependencies
 poetry install
+
 ```
 
-## Step 4: Process and Index Sample Documents
+## Step 4: Install Missing Dependencies
 
-The repository includes the Bitcoin whitepaper as a sample document. Let's process and index it:
+During our troubleshooting, we found some dependencies were missing from the project configuration:
 
 ```bash
-# Process the Markdown file into sections
+# Make sure you're in the venv
+source venv/bin/activate
+
+# Install critical missing dependencies
+pip install aiohttp pysolr loguru
+
+# Or add them via Poetry (recommended)
+poetry add aiohttp
+
+```
+
+## Step 5: Setup Solr Data
+
+```bash
+# Create directories and process sample data
+mkdir -p data/processed
 python scripts/process_markdown.py data/bitcoin-whitepaper.md --output data/processed/bitcoin_sections.json
-
-# Create a unified collection
 python scripts/create_unified_collection.py unified
-
-# Index the sections with embeddings
-python scripts/unified_index.py data/processed/bitcoin_sections.json --collection unified
+python scripts/standalone_vector_index.py data/processed/bitcoin_sections.json --collection unified
 ```
 
-## Step 5: Run the MCP Server
+## Step 6: Install Node.js (for Filesystem MCP Server)
 
 ```bash
-poetry run python -m solr_mcp.server
+# Install Node.js for the filesystem MCP server
+brew install node
+
+# Verify installation
+node --version
+npm --version
+
 ```
 
-By default, the server will run on http://localhost:8000
+## Step 7: Test Solr MCP Server
 
-## Step 6: Test the Search Functionality
-
-You can test the different search capabilities using the demo scripts:
+**Critical Discovery**: The Solr MCP server has two modes - web server mode and stdio mode. For Claude Desktop integration, you MUST use stdio mode.
 
 ```bash
-# Test keyword search
-python scripts/simple_search.py "double spend" --collection unified
+cd /Users/YOUR_USERNAME/projects/solr-mcp
+source venv/bin/activate
 
-# Test vector search
-python scripts/vector_search.py "how does bitcoin prevent fraud" --collection unified
+# Test in stdio mode (required for MCP)
+poetry run solr-mcp --transport stdio
 
-# Test hybrid search (combining keyword and vector)
-python scripts/simple_mcp_test.py
+# You should see:
+# - Zookeeper connection established
+# - Ollama vector provider initialized
+# - Server starting in MCP mode (not web server mode)
+
 ```
 
-## Using with Claude Desktop
+## Step 8: Configure Claude Desktop
 
-To use the MCP server with Claude Desktop:
-
-1. Make sure the MCP server is running
-2. In Claude Desktop, go to Settings > Tools
-3. Add a new tool with:
-   - Name: Solr Search
-   - URL: http://localhost:8000
-   - Working Directory: /path/to/solr-mcp
-
-Now you can ask Claude queries like:
-- "Search for information about double spending in the Bitcoin whitepaper"
-- "Find sections related to consensus mechanisms"
-- "What does the whitepaper say about transaction verification?"
-
-## Troubleshooting
-
-If you encounter issues:
-
-1. Check that Solr is running: http://localhost:8983/solr/
-2. Verify the collection exists: http://localhost:8983/solr/#/~collections
-3. Run the diagnostic script: `python scripts/diagnose_search.py`
-4. Check the server logs for errors
-
-## Setup linting and formatting
-
-We use several tools to maintain code quality:
+### Find Your Poetry Virtual Environment Path
 
 ```bash
-# Run code formatters (black and isort)
-poetry run python scripts/format.py
-# Or use the poetry script
-poetry run format
+# Find the exact path to your Poetry virtual environment
+poetry env info --path
+# Example output: /Users/Albert.Sun/Library/Caches/pypoetry/virtualenvs/solr-mcp-opjUMSi1-py3.13
 
-# Run linters (flake8 and mypy)
-poetry run python scripts/lint.py
-# Or use the poetry script
-poetry run lint
 ```
 
-You can also run individual tools:
+### Create/Update MCP Configuration
 
-```bash
-# Format code with Black
-poetry run black solr_mcp tests
+Add the following MCP Server `~/Library/Application Support/Claude/claude_desktop_config.json`, 
 
-# Sort imports with isort
-poetry run isort solr_mcp tests
+<aside>
+💡
 
-# Run flake8 linter
-poetry run flake8 solr_mcp tests
+For the following script, make sure you:
 
-# Run mypy type checker
-poetry run mypy solr_mcp tests
+- change “command” to the location of your python interpreter
+- change “cwd” to the location of your solr-mcp folder and
+- change all instances of `YOUR_USERNAME` to your laptop username.
+</aside>
+
+```json
+{
+  "mcpServers": {
+    "solr-search": {
+      "command": "/Users/YOUR_USERNAME/Library/Caches/pypoetry/virtualenvs/solr-mcp-XXXXX-py3.13/bin/python",
+      "args": ["-m", "solr_mcp.server", "--transport", "stdio"],
+      "cwd": "/Users/YOUR_USERNAME/projects/solr-mcp"
+    }
+  }
+}
+
 ```
+
+**Key Points:**
+
+- Replace `YOUR_USERNAME` with your actual username
+- Replace the virtual environment path with your actual Poetry env path
+- The `-transport stdio` flag is CRITICAL - without it, the server runs in web mode and won't work with Claude Desktop
+
+## Step 9: Restart Claude Desktop
+
+1. Completely quit Claude Desktop (Cmd+Q or Force Quit)
+2. Restart Claude Desktop
+3. Check for the hammer icon (🔨) indicating MCP tools are available
+
+## Troubleshooting Common Issues
+
+### Issue 1: `spawn npx ENOENT`
+
+**Solution**: Install Node.js via `brew install node`
+
+### Issue 2: `spawn poetry ENOENT`
+
+**Solution**: Use the full path to Poetry executable instead of just `poetry`
+
+### Issue 3: Missing Python dependencies
+
+**Solution**: Run `poetry install` and manually install missing packages like `aiohttp`
+
+### Issue 4: Server runs but doesn't connect to Claude Desktop
+
+**Solution**: Add `--transport stdio` to force stdio mode instead of web server mode
+
+### Issue 5: Only filesystem server shows in logs, no solr-search
+
+**Solution**: Usually means the command path is wrong or missing the `--transport stdio` flag
+
+## Verification
+
+After successful setup, you should see both servers in Claude Desktop logs:
+
+```
+[filesystem] [info] Initializing server...
+[filesystem] [info] Server started and connected successfully
+[solr-search] [info] Initializing server...
+[solr-search] [info] Server started and connected successfully
+
+```
+
+And you should see MCP tools available in the Claude Desktop interface (hammer icon).
+
+## Key Lessons Learned
+
+1. **Poetry vs Local venv**: Poetry creates its own virtual environments in a cache directory, separate from local `venv` folders
+2. **Transport modes matter**: MCP servers can run in different modes - always use `stdio` for Claude Desktop
+3. **Dependencies**: Some Python packages may be missing from `pyproject.toml` but required by the code
+4. **Full paths required**: Claude Desktop needs absolute paths to executables, not just command names
+5. **Node.js dependency**: Even if you only want Python MCP servers, Node.js is needed for other MCP servers like filesystem
+
+## Dependencies Summary
+
+**System Level:**
+
+- Homebrew
+- Docker & Docker Compose
+- Node.js (for filesystem MCP server)
+- Python 3.10+
+
+**Python Environment:**
+
+- Poetry (for dependency management)
+- Virtual environment with all project dependencies
+- Additional packages: aiohttp, pysolr, loguru (if missing)
+
+**External Services:**
+
+- Zookeeper (via Docker)
+- Solr (via Docker)
+- Ollama (for vector embeddings)
+
+This guide should help anyone set up Solr MCP with Claude Desktop while avoiding the common pitfalls we encountered!
