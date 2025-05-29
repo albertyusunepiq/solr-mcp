@@ -280,42 +280,113 @@ class SolrClient:
         field: Optional[str] = None,
         vector_provider_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Execute SQL query filtered by semantic similarity.
-
-        Args:
-            query: SQL query to execute
-            text: Search text to convert to vector
-            field: Optional name of the vector field to search against. If not provided, the first vector field will be auto-detected.
-            vector_provider_config: Optional configuration for the vector provider
-                                    Can include 'model', 'base_url', etc.
-
-        Returns:
-            Query results
-
-        Raises:
-            SolrError: If search fails
-            QueryError: If query execution fails
+        """
+        Run a SQL-SELECT filtered by semantic similarity using direct Ollama + Solr approach.
+        This replaces the complex two-step process with the proven standalone script logic.
         """
         try:
-            # Parse and validate query to get collection name
+            import aiohttp
+            import json
+            
+            # ── 1. Parse SQL to get collection and limits ──────────────────────────
             ast, collection, _ = self.query_builder.parse_and_validate_select(query)
+            
+            limit = 10
+            offset = 0
+            if ast.args.get("limit"):
+                try:
+                    limit = int(
+                        getattr(ast.args["limit"], "expression", ast.args["limit"]).this
+                        if hasattr(ast.args["limit"], "expression")
+                        else ast.args["limit"]
+                    )
+                except Exception:
+                    limit = 10
+            if ast.args.get("offset"):
+                offset = int(ast.args["offset"])
 
-            # Extract model from config if present
-            model = (
-                vector_provider_config.get("model") if vector_provider_config else None
-            )
+            # ── 2. Generate embedding directly via Ollama API ──────────────────────
+            async def get_embedding_from_ollama(text: str) -> List[float]:
+                url = "http://localhost:11434/api/embeddings"
+                data = {
+                    "model": "nomic-embed-text",
+                    "prompt": text
+                }
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, json=data) as response:
+                        if response.status == 200:
+                            result = await response.json()
+                            return result["embedding"]
+                        else:
+                            error_text = await response.text()
+                            raise Exception(f"Ollama API error {response.status}: {error_text}")
 
-            # Validate and potentially auto-detect vector field
-            field, field_info = await self.vector_manager.validate_vector_field(
-                collection=collection, field=field, vector_provider_model=model
-            )
+            # ── 3. Execute vector search directly via Solr API ─────────────────────
+            async def vector_search_solr(query_vector: List[float], collection: str, top_k: int):
+                # Use embedding field (already confirmed to exist)
+                vector_str = "[" + ",".join(str(x) for x in query_vector) + "]"
+                
+                solr_url = f"http://localhost:8983/solr/{collection}/select"
+                
+                # Extract field names from original SQL query for response
+                fields_to_return = self._extract_fields_from_sql(query)
+                
+                query_data = {
+                    "query": f"{{!knn f=embedding topK={top_k}}}{vector_str}",
+                    "fields": fields_to_return,
+                    "limit": top_k,
+                    "offset": offset
+                }
+                
+                headers = {"Content-Type": "application/json"}
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(solr_url, json=query_data, headers=headers) as response:
+                        if response.status == 200:
+                            solr_result = await response.json()
+                            
+                            # Convert Solr response to MCP format
+                            docs = solr_result.get("response", {}).get("docs", [])
+                            num_found = solr_result.get("response", {}).get("numFound", 0)
+                            
+                            # Add EOF marker like other MCP responses
+                            if docs:
+                                docs.append({"EOF": True})
+                            
+                            return {
+                                "result-set": {
+                                    "docs": docs,
+                                    "numFound": num_found + 1,  # +1 for EOF
+                                    "start": offset
+                                }
+                            }
+                        else:
+                            error_text = await response.text()
+                            raise Exception(f"Solr error {response.status}: {error_text}")
 
-            # Get vector using the vector provider configuration
-            vector = await self.vector_manager.get_vector(text, vector_provider_config)
+            # ── 4. Execute the direct approach ─────────────────────────────────────
+            query_vector = await get_embedding_from_ollama(text)
+            result = await vector_search_solr(query_vector, collection, limit)
+            
+            return result
 
-            # Reuse vector query logic
-            return await self.execute_vector_select_query(query, vector, field)
-        except Exception as e:
-            if isinstance(e, (QueryError, SolrError)):
-                raise
-            raise SolrError(f"Semantic search failed: {str(e)}")
+        except Exception as exc:
+            raise SolrError(f"Semantic search failed: {exc}") from exc
+
+
+    def _extract_fields_from_sql(self, query: str) -> str:
+        """Extract field list from SQL query for Solr field parameter."""
+        query_upper = query.upper().strip()
+        
+        if query_upper.startswith("SELECT *"):
+            return "*"
+        elif query_upper.startswith("SELECT "):
+            # Extract field list between SELECT and FROM
+            select_part = query[6:].strip()  # Remove "SELECT "
+            from_index = select_part.upper().find(" FROM ")
+            if from_index != -1:
+                fields_part = select_part[:from_index].strip()
+                return fields_part
+        
+        return "id,title,content,score"  # default fields
